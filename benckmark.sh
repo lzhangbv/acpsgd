@@ -8,10 +8,10 @@ rdma="${rdma:-0}"
 source ../configs/envs.conf
 
 if [ "$dnn" = "bert_base" ] || [ "$dnn" = "bert_large" ]; then
-    script=bert_benchmark.py
+    script=benckmark/bert_benchmark.py
     params="--model $dnn --sentence-len $senlen --batch-size $bs --rank $rank"
 else
-    script=imagenet_benchmark.py
+    script=benckmark/imagenet_benchmark.py
     params="--model $dnn --batch-size $bs --rank $rank"
 fi
 
