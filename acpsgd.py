@@ -44,7 +44,8 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         r"""Distributed ACP-SGD optimizer with WFBP and tensor fusion. 
         Args:
             params: optimizer parameters. 
-            named_parameters: A mapping between parameter names and values. Used for naming of allreduce operations.
+            named_parameters: A mapping between parameter names and values. 
+            rank: rank size for power iteration. 
             threshold: buffer size threshold for tensor fusion.
         """
         super(self.__class__, self).__init__(params)
@@ -78,7 +79,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         p_size = []
         q_size = []
         model_size = []
-        self._param_errors = {}
+        self._param_errors = {} # error-feedback for compressed gradients
         for p in self._register_parameters[::-1]:
             p_name = self._param_names[p]
             if p.ndimension() > 1: # compressed tensors
@@ -92,7 +93,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
                 q_size.append(p.data.numel() * 4/1024/1024)
                 model_size.append(p.data.numel() * 4/1024/1024)
         if rank() == 0: 
-            print('Memory (MB) Grad: %.2f, P: %.2f, Q: %.2f'%(sum(model_size), sum(p_size), sum(q_size)))
+            print('Memory (MB) Grad: %.2f, P: %.2f, Q: %.2f'%(sum(model_size), sum(p_size), sum(q_size))) 
 
         # Generate P Groups e.g. [[p3, p2], [p1]]
         p_groups = []
@@ -144,7 +145,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
             buffer_p = self._get_buffer_p(p_group)
             self._buffers_p.append(buffer_p)
 
-        self._param_group_flags_p = [[0]*len(g) for g in p_groups] # check whether param group is ready
+        self._param_group_flags_p = [[False]*len(g) for g in p_groups] # check whether param group is ready
 
         if rank() == 0: 
             print('P Buffer sizes (MB):', 
@@ -193,7 +194,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
             buffer_q = self._get_buffer_q(q_group)
             self._buffers_q.append(buffer_q)
 
-        self._param_group_flags_q = [[0]*len(g) for g in q_groups] # check whether param group is ready
+        self._param_group_flags_q = [[False]*len(g) for g in q_groups] # check whether param group is ready
 
         if rank() == 0: 
             print('Q Buffer sizes (MB):', 
@@ -256,12 +257,16 @@ class _DistributedOptimizer(torch.optim.Optimizer):
             Q = self._param_qs.get(name)
             E = self._param_errors.get(name)
 
-            if E is not None:
-                # update compressed tensor in the buffer
-                new_name, buffer = self._alternative_compress(name, tensor, P, Q, E)
-            else:
-                # update uncompressed tensor in the buffer
-                new_name, buffer = self._push_to_buffer(name, tensor)
+            if E is not None: # update compressed tensor in the buffer
+                self._alternative_compress(name, tensor, P, Q, E)
+            else: # update uncompressed tensor in the buffer
+                if self._compute_p:
+                    P.copy_(tensor)
+                else:
+                    Q.copy_(tensor)
+            
+            # check whether buffer is ready to call an all-reduce
+            new_name, buffer = self._buffer_is_ready(name)
 
             if buffer is not None: 
                 self._streams["reduce"].wait_stream(torch.cuda.current_stream())
@@ -272,40 +277,34 @@ class _DistributedOptimizer(torch.optim.Optimizer):
     def _alternative_compress(self, name, tensor, P, Q, E):
         with torch.no_grad():
             M = tensor.view(tensor.shape[0], -1)
-            if self._compute_p:
+            if self._compute_p: 
                 Q.copy_(torch.linalg.qr(Q).Q)
-                P = (M + E) @ Q
+                P.copy_((M + E) @ Q)
                 E.add_(M - P @ Q.T)
-                return self._push_to_buffer(name, P)
             else:
                 P.copy_(torch.linalg.qr(P).Q)
-                Q = (M + E).T @ P
+                Q.copy_((M + E).T @ P)
                 E.add_(M - P @ Q.T)
-                return self._push_to_buffer(name, Q)
 
-    def _push_to_buffer(self, name, tensor):
+    def _buffer_is_ready(self, name):
         """
-        Push tensor to buffer for fusion.
+        Check whether buffer is ready to call an all-reduce.
         """
         with torch.no_grad():
             if self._compute_p:
                 group_idx, sub_idx = self._param_group_idx_p[name]
-                P = self.param_ps[name]
-                P.copy_(tensor)
-                self._param_group_flags_p[group_idx][sub_idx] = 1
+                self._param_group_flags_p[group_idx][sub_idx] = True
                 for flag in self._param_group_flags_p[group_idx]:
-                    if flag == 0: # not ready
+                    if not flag: # not ready
                         return name, None
                 buffer = self._buffers_p[group_idx]
                 comm_name = 'reduce-p-group-%d' % group_idx
                 return comm_name, buffer
             else:
                 group_idx, sub_idx = self._param_group_idx_q[name]
-                Q = self.param_qs[name]
-                Q.copy_(tensor)
-                self._param_group_flags_q[group_idx][sub_idx] = 1
+                self._param_group_flags_q[group_idx][sub_idx] = True
                 for flag in self._param_group_flags_q[group_idx]:
-                    if flag == 0: # not ready
+                    if not flag: # not ready
                         return name, None
                 buffer = self._buffers_q[group_idx]
                 comm_name = 'reduce-q-group-%d' % group_idx
@@ -317,7 +316,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         """
         torch.cuda.current_stream().wait_stream(self._streams["reduce"])
 
-        # Approximate Grads
+        # approximate gradient
         for p in self._register_parameters:
             if p.ndimension() > 1: 
                 name = self._param_names.get(p)
@@ -331,13 +330,13 @@ class _DistributedOptimizer(torch.optim.Optimizer):
                 p.grad.data.copy_(bias)
             p.grad.data.div_(size())
         
-        # Clear flags
-        self._param_group_flags_p = [[0]*len(g) for g in self._param_group_flags_p]
-        self._param_group_flags_q = [[0]*len(g) for g in self._param_group_flags_q]
+        # clear flags
+        self._param_group_flags_p = [[False]*len(g) for g in self._param_group_flags_p]
+        self._param_group_flags_q = [[False]*len(g) for g in self._param_group_flags_q]
         self._compute_p = not self._compute_p
 
 
-    def step(self, closure=None):
+    def step(self, closure=None): 
         """
         Performs a single optimization step.
         """
