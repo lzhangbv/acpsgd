@@ -2,12 +2,12 @@
 nworkers="${nworkers:-4}"
 rdma="${rdma:-1}"
 
-source ../configs/envs.conf
+source envs.conf
 script=examples/mnist/pytorch_mnist.py
 params=''
 
 # multi-node multi-GPU setting
-node_rank=1  # launch node1, node2, ...
+node_rank=16  # launch node1, node2, ...
 ngpu_per_node=4
 node_count=$(expr $nworkers / $ngpu_per_node)
 

@@ -57,20 +57,20 @@ if args.cuda:
 
 cudnn.benchmark = True
 
-DATAPATH='/datasets/shshi'
-pretrained_path='%s/pretrained'%DATAPATH
+dirname = os.path.dirname(__file__)
+bert_filename = os.path.join(dirname, 'bert_base_config.json') if args.model == 'bert_base' else os.path.join(dirname, 'bert_large_config.json')
+config = BertConfig.from_json_file(bert_filename)
 
-if args.model == 'bert_base':
-    config = BertConfig.from_json_file('bert_base_config.json')
-else:
-    config = BertConfig.from_json_file('bert_config.json')
+#if args.model == 'bert_base':
+#    config = BertConfig.from_json_file('bert_base_config.json')
+#else:
+#    config = BertConfig.from_json_file('bert_large_config.json')
+
 # Padding for divisibility by 8
 if config.vocab_size % 8 != 0:
     config.vocab_size += 8 - (config.vocab_size % 8)
 
 vocab_size=config.vocab_size
-#tokenizer = BertTokenizer.from_pretrained(pretrained_path)
-#model = BertForPreTraining.from_pretrained(pretrained_path)
 model = BertForPreTraining(config)
 
 if args.cuda:
@@ -128,8 +128,6 @@ if hvd.size() > 1:
 
 def benchmark_step():
     optimizer.zero_grad()
-    #loss, prediction_scores, seq_relationship_score = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_masks, masked_lm_labels=masked_lm_labels, next_sentence_label=next_sentence_label)
-    #prediction_scores, seq_relationship_score = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_masks)
     outputs = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_masks)
     if len(outputs) == 2:
         prediction_scores, seq_relationship_score = outputs[0], outputs[1]

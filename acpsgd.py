@@ -15,7 +15,7 @@
 # ==============================================================================
 
 """
-Implement ACP-SGD on pure Pytorch. 
+Implement ACP-SGD atop Pytorch. 
 """
 
 from __future__ import absolute_import
@@ -29,7 +29,6 @@ import collections
 import numpy as np
 import torch.distributed as dist
 
-#import utils
 
 def rank():
     return dist.get_rank()
@@ -37,7 +36,7 @@ def rank():
 def size():
     return dist.get_world_size()
 
-THRESHOLD = 25 # default: 25MB
+THRESHOLD = 5 # default buffer size threshold
 
 class _DistributedOptimizer(torch.optim.Optimizer):
     def __init__(self, params, named_parameters, rank=4, threshold=THRESHOLD):
@@ -56,8 +55,8 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         self._grad_accs = []
 
         # parameter names
-        named_parameters = list(named_parameters())
-        if len(named_parameters) > 0:
+        if named_parameters is not None:
+            named_parameters = list(named_parameters)
             self._param_names = {v: k for k, v in sorted(named_parameters)}
         else:
             self._param_names = {v: 'param.noname.%s' % i
@@ -84,9 +83,10 @@ class _DistributedOptimizer(torch.optim.Optimizer):
             p_name = self._param_names[p]
             if p.ndimension() > 1: # compressed tensors
                 M = p.view(p.shape[0], -1)
+                r = min(self._rank, min(M.shape)) # ensure r<=min(n, m)
                 self._param_errors[p_name] = torch.zeros_like(M)
-                p_size.append(M.shape[0] * self._rank * 4/1024/1024) #MB
-                q_size.append(M.shape[1] * self._rank * 4/1024/1024)
+                p_size.append(M.shape[0] * r * 4/1024/1024) #MB
+                q_size.append(M.shape[1] * r * 4/1024/1024)
                 model_size.append(p.data.numel() * 4/1024/1024)
             else: # uncompressed tensors
                 p_size.append(p.data.numel() * 4/1024/1024)
@@ -157,7 +157,8 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         for p in p_group:
             if p.ndimension() > 1:
                 M = p.view(p.shape[0], -1)
-                start_p += M.shape[0] * self._rank
+                r = min(self._rank, min(M.shape))
+                start_p += M.shape[0] * r
             else:
                 start_p += p.data.numel()
         buffer_p = torch.randn(start_p, device=p.device) # check: set seed
@@ -168,13 +169,14 @@ class _DistributedOptimizer(torch.optim.Optimizer):
             p_name = self._param_names[p]
             if p.ndimension() > 1:
                 M = p.view(p.shape[0], -1)
-                ps = M.shape[0] * self._rank
-                P = buffer_p[start_p, start_p+ps].view(M.shape[0], self._rank)
+                r = min(self._rank, min(M.shape))
+                ps = M.shape[0] * r
+                P = buffer_p[start_p:start_p+ps].view(M.shape[0], r)
                 self._param_ps[p_name] = P
                 start_p += ps
             else:
                 ps = p.data.numel()
-                P = buffer_p[start_p, start_p+ps].view(p.data.shape)
+                P = buffer_p[start_p:start_p+ps].view(p.data.shape)
                 self._param_ps[p_name] = P
                 start_p += ps
         return buffer_p
@@ -206,7 +208,8 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         for p in q_group:
             if p.ndimension() > 1:
                 M = p.view(p.shape[0], -1)
-                start_p += M.shape[1] * self._rank
+                r = min(self._rank, min(M.shape))
+                start_p += M.shape[1] * r
             else:
                 start_p += p.data.numel()
         buffer_q = torch.randn(start_p, device=p.device) # check: set seed
@@ -217,13 +220,14 @@ class _DistributedOptimizer(torch.optim.Optimizer):
             p_name = self._param_names[p]
             if p.ndimension() > 1:
                 M = p.view(p.shape[0], -1)
-                qs = M.shape[1] * self._rank
-                Q = buffer_q[start_p, start_p+qs].view(M.shape[1], self._rank)
+                r = min(self._rank, min(M.shape))
+                qs = M.shape[1] * r
+                Q = buffer_q[start_p:start_p+qs].view(M.shape[1], r)
                 self._param_qs[p_name] = Q
                 start_p += qs
             else:
                 qs = p.data.numel()
-                Q = buffer_q[start_p, start_p+qs].view(p.data.shape)
+                Q = buffer_q[start_p:start_p+qs].view(p.data.shape)
                 self._param_qs[p_name] = Q
                 start_p += qs
         return buffer_q
@@ -237,12 +241,11 @@ class _DistributedOptimizer(torch.optim.Optimizer):
             for p in param_group['params']:
                 if p.requires_grad:
                     p.grad = p.data.new(p.size()).zero_()
-                    self._requires_update.add(p)
                     p_tmp = p.expand_as(p)
                     grad_acc = p_tmp.grad_fn.next_functions[0][0]
                     grad_acc.register_hook(self._make_hook(p))
                     self._grad_accs.append(grad_acc)
-                    self._register_parameters.add(p)
+                    self._register_parameters.append(p)
 
     def _make_hook(self, p):
         """
@@ -312,7 +315,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
 
     def _bp_barrier(self):
         """
-        Synchronize the reduce-scatter operations and start the all-gather on the first group.
+        Synchronize the all-reduce operations.
         """
         torch.cuda.current_stream().wait_stream(self._streams["reduce"])
 
@@ -320,7 +323,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         for p in self._register_parameters:
             if p.ndimension() > 1: 
                 name = self._param_names.get(p)
-                # get grad, and previous P, Q, Error-feedback
+                # get P and Q
                 P = self._param_ps.get(name)
                 Q = self._param_qs.get(name)
                 p.grad.data.view(p.grad.shape[0], -1).copy_(P @ Q.T)
@@ -346,7 +349,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
 
 
 
-def DistributedOptimizer(optimizer, named_parameters, rank=4, threshold=THRESHOLD):
+def DistributedOptimizer(optimizer, named_parameters=None, rank=4, threshold=THRESHOLD):
     """
     Wrap optimizer to gurantee the consistency. 
     Warning: some functions are not supported now, so we will simply skip these parameters.
