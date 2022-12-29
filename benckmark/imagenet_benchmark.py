@@ -9,6 +9,7 @@ from torchvision import models
 import os
 import torch.distributed as dist
 import acpsgd as hvd
+import torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook as PowerSGD
 
 import timeit
 import numpy as np
@@ -22,6 +23,8 @@ parser.add_argument('--fp16', action='store_true', default=False,
 
 parser.add_argument('--model', type=str, default='resnet50',
                     help='model to benchmark')
+parser.add_argument('--opt', type=str, default='ssgd', 
+                    help='choices: ssgd, powersgd, acpsgd')
 parser.add_argument('--batch-size', type=int, default=32,
                     help='input batch size')
 
@@ -89,15 +92,25 @@ target = torch.LongTensor(args.batch_size).random_() % 1000
 if args.cuda:
     data, target = data.cuda(), target.cuda()
 
-if hvd.size() > 1:
+# choices: ssgd, acpsgd, powersgd (ddp communication hook)
+if args.opt == 'ssgd':
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
+elif args.opt == 'powersgd':
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
+    state = PowerSGD.PowerSGDState(process_group=None, matrix_approximation_rank=args.rank, 
+            start_powerSGD_iter=3)
+    model.register_comm_hook(state, PowerSGD.powerSGD_hook)
+elif args.opt == 'acpsgd':
     optimizer = hvd.DistributedOptimizer(optimizer, rank=args.rank)
+else:
+    raise NotImplementedError
 
 if apex is not None:
     model, optimizer = apex.amp.initialize(model, optimizer, opt_level='O2', loss_scale=128.0)
 
-if hvd.size() > 0:
+#if hvd.size() > 0:
     # Horovod: broadcast parameters & optimizer state.
-    hvd.broadcast_parameters(model.state_dict(), root_rank=0)
+    #hvd.broadcast_parameters(model.state_dict(), root_rank=0)
     #hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
 

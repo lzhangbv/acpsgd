@@ -5,19 +5,20 @@ dnn="${dnn:-resnet50}"
 senlen="${senlen:-64}"
 rank="${rank:-32}"
 rdma="${rdma:-0}"
+opt="${opt:-ssgd}"
 source envs.conf
 
 if [ "$dnn" = "bert_base" ] || [ "$dnn" = "bert_large" ]; then
     script=benckmark/bert_benchmark.py
-    params="--model $dnn --sentence-len $senlen --batch-size $bs --rank $rank"
+    params="--model $dnn --sentence-len $senlen --batch-size $bs --rank $rank --opt $opt"
 else
     script=benckmark/imagenet_benchmark.py
-    params="--model $dnn --batch-size $bs --rank $rank"
+    params="--model $dnn --batch-size $bs --rank $rank --opt $opt"
 fi
 
 
 # multi-node multi-GPU setting
-node_rank=15  # launch node1, node2, ...
+node_rank=13  # launch node1, node2, ...
 ngpu_per_node=4
 node_count=$(expr $nworkers / $ngpu_per_node)
 
