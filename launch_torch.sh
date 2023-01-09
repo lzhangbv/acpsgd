@@ -24,8 +24,10 @@ fi
 net_config="export OMP_NUM_THREADS=4; $net_config"
 
 # cluster settings
-total_host=16
-hosts=('gpu1' 'gpu2' 'gpu3' 'gpu4' 'gpu5' 'gpu6' 'gpu7' 'gpu8' 'gpu9' 'gpu10' 'gpu11' 'gpu12' 'gpu13' 'gpu14' 'gpu15' 'gpu16')
+#total_host=16
+#hosts=('gpu1' 'gpu2' 'gpu3' 'gpu4' 'gpu5' 'gpu6' 'gpu7' 'gpu8' 'gpu9' 'gpu10' 'gpu11' 'gpu12' 'gpu13' 'gpu14' 'gpu15' 'gpu16')
+total_host=8
+hosts=('gpu1' 'gpu3' 'gpu4' 'gpu5' 'gpu6' 'gpu7' 'gpu12' 'gpu15')
 
 # multi-node multi-gpu settings
 ngpu_per_node="${ngpu_per_node:-1}"

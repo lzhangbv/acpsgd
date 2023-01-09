@@ -18,7 +18,7 @@ fi
 
 
 # multi-node multi-GPU setting
-node_rank=13  # launch node1, node2, ...
+node_rank=1  # launch node1, node2, ...
 ngpu_per_node=4
 node_count=$(expr $nworkers / $ngpu_per_node)
 

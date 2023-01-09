@@ -36,7 +36,7 @@ def rank():
 def size():
     return dist.get_world_size()
 
-THRESHOLD = 5 # default buffer size threshold
+THRESHOLD = 25 # default buffer size threshold (MB)
 
 class _DistributedOptimizer(torch.optim.Optimizer):
     def __init__(self, params, named_parameters, rank=4, threshold=THRESHOLD):
@@ -45,7 +45,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
             params: optimizer parameters. 
             named_parameters: A mapping between parameter names and values. 
             rank: rank size for power iteration. 
-            threshold: buffer size threshold for tensor fusion.
+            threshold: buffer size threshold (in MB) for tensor fusion.
         """
         super(self.__class__, self).__init__(params)
         self._rank = rank
@@ -66,7 +66,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         self._register_hooks()
         self._generate_groups_with_threshold()
         self._streams = {}
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and size() > 1:
             # Stream for grad reduction in the backward pass.  
             self._streams["reduce"] = torch.cuda.Stream()
 
@@ -94,6 +94,10 @@ class _DistributedOptimizer(torch.optim.Optimizer):
                 model_size.append(p.data.numel() * 4/1024/1024)
         if rank() == 0: 
             print('Memory (MB) Grad: %.2f, P: %.2f, Q: %.2f'%(sum(model_size), sum(p_size), sum(q_size))) 
+        
+        # compressed buffer size
+        threshold_p = self._threshold * sum(p_size) / sum(model_size)
+        threshold_q = self._threshold * sum(q_size) / sum(model_size)
 
         # Generate P Groups e.g. [[p3, p2], [p1]]
         p_groups = []
@@ -101,7 +105,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         tot_size = 0
         for i, p in enumerate(self._register_parameters[::-1]):
             ps = p_size[i]
-            if tot_size == 0 or tot_size + ps <= self._threshold:
+            if tot_size == 0 or tot_size + ps <= threshold_p:
                 current_group.append(p)
                 tot_size += ps
             else:
@@ -118,7 +122,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         tot_size = 0
         for i, p in enumerate(self._register_parameters[::-1]):
             qs = q_size[i]
-            if tot_size == 0 or tot_size + qs <= self._threshold:
+            if tot_size == 0 or tot_size + qs <= threshold_q:
                 current_group.append(p)
                 tot_size += qs
             else:
@@ -271,7 +275,7 @@ class _DistributedOptimizer(torch.optim.Optimizer):
             # check whether buffer is ready to call an all-reduce
             new_name, buffer = self._buffer_is_ready(name)
 
-            if buffer is not None: 
+            if buffer is not None and size() > 1: 
                 self._streams["reduce"].wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(self._streams["reduce"]):
                     dist.all_reduce(buffer)
@@ -317,7 +321,8 @@ class _DistributedOptimizer(torch.optim.Optimizer):
         """
         Synchronize the all-reduce operations.
         """
-        torch.cuda.current_stream().wait_stream(self._streams["reduce"])
+        if size() > 1:
+            torch.cuda.current_stream().wait_stream(self._streams["reduce"])
 
         # approximate gradient
         for p in self._register_parameters:
