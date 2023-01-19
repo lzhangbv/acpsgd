@@ -43,6 +43,7 @@ parser.add_argument('--no-cuda', action='store_true', default=False,
 parser.add_argument('--use-adasum', action='store_true', default=False,
                     help='use adasum algorithm to do reduction')
 parser.add_argument('--rank', type=int, default=4, help='Rank')
+parser.add_argument('--threshold', type=float, default=25, help='Buffer size threshold for tensor fusion')
 parser.add_argument('--rdma', action='store_true', default=False, help='Use RDMA')
 parser.add_argument('--local_rank', type=int, default=0, help='local rank for distributed training')
 
@@ -126,14 +127,14 @@ optimizer = optim.SGD(model.parameters(), lr=2e-5)
 
 # choices: ssgd, acpsgd, powersgd (ddp communication hook)
 if args.opt == 'ssgd':
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], bucket_cap_mb=args.threshold)
 elif args.opt == 'powersgd':
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], bucket_cap_mb=args.threshold)
     state = PowerSGD.PowerSGDState(process_group=None, matrix_approximation_rank=args.rank, 
-            start_powerSGD_iter=3)
+            start_powerSGD_iter=3) # min_compression_rate=0.5)
     model.register_comm_hook(state, PowerSGD.powerSGD_hook)
 elif args.opt == 'acpsgd':
-    optimizer = hvd.DistributedOptimizer(optimizer, rank=args.rank)
+    optimizer = hvd.DistributedOptimizer(optimizer, rank=args.rank, threshold=args.threshold)
 else:
     raise NotImplementedError
 

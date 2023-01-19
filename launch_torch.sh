@@ -15,19 +15,22 @@ params="${params:-}"
 echo "launch dir: $directory"
 
 # network config
-rdma="${rdma:-1}"
+rdma="${rdma:-0}"
 if [ "$rdma" = "0" ]; then
     net_config="export NCCL_SOCKET_IFNAME=$ETH_INTERFACE; export NCCL_IB_DISABLE=1;"
-else
+elif [ "$rdma" = "1" ]; then
     net_config="export NCCL_SOCKET_IFNAME=$IB_INTERFACE; export NCCL_IB_DISABLE=0;"
+else
+    net_config="export NCCL_SOCKET_IFNAME=$ETH_INTERFACE_1Gb; export NCCL_IB_DISABLE=1;"
 fi
 net_config="export OMP_NUM_THREADS=4; $net_config"
 
+#use ring algorithm
+#net_config="export NCCL_ALGO=Ring; $net_config"
+
 # cluster settings
-#total_host=16
-#hosts=('gpu1' 'gpu2' 'gpu3' 'gpu4' 'gpu5' 'gpu6' 'gpu7' 'gpu8' 'gpu9' 'gpu10' 'gpu11' 'gpu12' 'gpu13' 'gpu14' 'gpu15' 'gpu16')
-total_host=8
-hosts=('gpu1' 'gpu3' 'gpu4' 'gpu5' 'gpu6' 'gpu7' 'gpu12' 'gpu15')
+total_host=$total_host
+hosts=$hosts
 
 # multi-node multi-gpu settings
 ngpu_per_node="${ngpu_per_node:-1}"

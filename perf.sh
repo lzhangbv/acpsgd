@@ -4,16 +4,17 @@ bs="${bs:-64}"
 dnn="${dnn:-resnet50}"
 senlen="${senlen:-64}"
 rank="${rank:-32}"
+threshold="${threshold:-25}"
 rdma="${rdma:-0}"
 opt="${opt:-ssgd}"
 source envs.conf
 
 if [ "$dnn" = "bert_base" ] || [ "$dnn" = "bert_large" ]; then
     script=benckmark/bert_benchmark.py
-    params="--model $dnn --sentence-len $senlen --batch-size $bs --rank $rank --opt $opt"
+    params="--model $dnn --sentence-len $senlen --batch-size $bs --rank $rank --threshold $threshold --opt $opt"
 else
     script=benckmark/imagenet_benchmark.py
-    params="--model $dnn --batch-size $bs --rank $rank --opt $opt"
+    params="--model $dnn --batch-size $bs --rank $rank --threshold $threshold --opt $opt"
 fi
 
 
